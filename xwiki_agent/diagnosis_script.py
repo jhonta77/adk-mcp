@@ -59,32 +59,30 @@ def check_python_version():
         return False
 
 def check_dependencies():
-    """Asegura que todas las bibliotecas de Python requeridas estén instaladas."""
-    print_header("VERIFICACIÓN DE DEPENDENCIAS")
-    
-    # Diccionario de módulos a verificar y el nombre del paquete para la instalación.
+    """Ensure all required Python libraries are installed."""
+    print_header("DEPENDENCY CHECK")
+
+    # Map modules to their installable package names.
     dependencies = {
         "google.adk.agents": "google-adk",
-        "mcp": "mcp", 
+        "mcp": "mcp",
         "requests": "requests",
         "dotenv": "python-dotenv",
     }
-    
+
     all_ok = True
-    
-    # Itera sobre cada dependencia requerida.
+
     for module_name, package_name in dependencies.items():
         try:
-            # Intenta importar el módulo dinámicamente.
+            # Attempt to import the module dynamically.
             importlib.import_module(module_name)
-            print_status(f"Paquete '{package_name}'", True, f"El módulo '{module_name}' se importó correctamente.")
+            print_status(f"Package '{package_name}'", True, f"Module '{module_name}' imported successfully.")
         except ImportError:
-            # Si la importación falla, el paquete no está instalado.
-            print_status(f"Paquete '{package_name}'", False, f"No se encontró. Instálalo con: pip install {package_name}")
+            # Missing module means the package is not installed.
+            print_status(f"Package '{package_name}'", False, f"Not found. Install it with: pip install {package_name}")
             all_ok = False
-    
-    return all_ok
 
+    return all_ok
 def check_files():
     """Verifica la existencia de los archivos clave del proyecto."""
     print_header("VERIFICACIÓN DE ARCHIVOS DEL PROYECTO")
