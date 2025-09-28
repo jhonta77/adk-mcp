@@ -1,177 +1,170 @@
-# ADK Agent MCP Server
+# ADK XWiki Agent
 
-This project demonstrates an Agent Development Kit (ADK) agent that interacts with a local SQLite database. The interaction is facilitated by a Model Context Protocol (MCP) server that exposes tools to query and modify the database.
+## 1. Overview
+This project delivers a conversational agent built with the Google Agent Development Kit (ADK) and the Model Context Protocol (MCP). The agent connects to an XWiki instance to fetch, create, and update content through structured tool calls while keeping a natural dialogue with the user.
 
-## Project Structure
+### High-Level Flow
+<pre>
+User -> ADK Runner -> MCP Server (server.py) -> XWiki REST API
+</pre>
 
-```
-adk-mcp/
-├── local_mcp/
-│   ├── agent.py             # The ADK agent for the local SQLite DB
-│   ├── server.py            # The MCP server exposing database tools
-│   ├── create_db.py         # Script to initialize the SQLite database
-│   ├── database.db          # The SQLite database file
-│   └── __init__.py
-├── remote_mcp_agent/        # Example agent for connecting to a remote MCP server
-│   ├── agent.py             # The ADK agent configured for a remote MCP
-│   └── __init__.py
-├── .env                   # For GOOGLE_API_KEY (ensure it's in .gitignore if repo is public)
-├── requirements.txt       # Python dependencies
-└── readme.md              # This file
-```
+## 2. Repository Layout
+| Path | Purpose |
+| --- | --- |
+|  | Configures the ADK agent (), loads environment variables, and registers the MCP tools exposed by the server. |
+|  | Implements the MCP server, wraps the XWiki REST API as callable tools, and manages request logging. |
+|  | Base prompt that governs how the agent decides when and how to invoke the tools. |
+| 🚀 INICIANDO DIAGNÓSTICO DEL AGENTE XWIKI MCP 🚀
+Este script verificará que todos los componentes estén listos para la ejecución.
 
-## Setup Instructions
+============================================================
+🔍 VERIFICACIÓN DE VERSIÓN DE PYTHON
+============================================================
+🐍 Versión de Python detectada: 3.12.3
+✅ Versión de Python
+   └─ La versión 3.12 es compatible.
 
-### 1. Prerequisites
-- Python 3.8 or newer
-- Access to a terminal or command prompt
+============================================================
+🔍 VERIFICACIÓN DE DEPENDENCIAS
+============================================================
+❌ Paquete 'google-adk'
+   └─ No se encontró. Instálalo con: pip install google-adk
+❌ Paquete 'mcp'
+   └─ No se encontró. Instálalo con: pip install mcp
+✅ Paquete 'requests'
+   └─ El módulo 'requests' se importó correctamente.
+❌ Paquete 'python-dotenv'
+   └─ No se encontró. Instálalo con: pip install python-dotenv
 
-### 2. Create and Activate Virtual Environment
+============================================================
+🔍 VERIFICACIÓN DE ARCHIVOS DEL PROYECTO
+============================================================
+✅ Archivo 'server.py'
+   └─ (REQUERIDO) Contiene la lógica del servidor MCP y las herramientas de XWiki.
+✅ Archivo 'agent.py'
+   └─ (REQUERIDO) Define y configura el agente de IA.
+✅ Archivo '.env'
+   └─ (RECOMENDADO) Para almacenar variables de entorno como claves de API.
 
-It's highly recommended to use a virtual environment to manage project dependencies.
+============================================================
+🔍 VERIFICACIÓN DE CLAVE DE API DE GOOGLE
+============================================================
+❌ Clave de API de Google (GOOGLE_API_KEY)
+   └─ No se encontró en las variables de entorno. Asegúrate de crear un archivo .env con esta variable.
 
-```bash
-# Create a virtual environment (e.g., named .venv)
-python3 -m venv .venv
-```
+============================================================
+🔍 VERIFICACIÓN DE SINTAXIS Y CONTENIDO DE SERVER.PY
+============================================================
+✅ Sintaxis de 'server.py'
+   └─ El archivo tiene una sintaxis de Python válida.
+✅ Elementos requeridos en 'server.py'
+   └─ Todas las funciones y variables necesarias están presentes.
 
-Activate the virtual environment:
+============================================================
+🔍 VERIFICACIÓN DE CONFIGURACIÓN DE XWIKI
+============================================================
+✅ Variable 'XWIKI_URL'
+   └─ URL del servidor XWiki parece estar configurada.
+✅ Variable 'XWIKI_USER'
+   └─ Usuario para la API de XWiki parece estar configurada.
+✅ Variable 'XWIKI_PASS'
+   └─ Contraseña para la API de XWiki parece estar configurada.
 
-On macOS/Linux:
-```bash
-# Activate virtual environment
-source .venv/bin/activate
-```
+============================================================
+🔍 REPORTE FINAL DE DIAGNÓSTICO
+============================================================
+📊 Total de verificaciones: 4 de 6 pasaron exitosamente.
 
-On Windows:
-```bash
-# Activate virtual environment
-.venv\Scripts\activate
-```
+⚠️ Se encontraron 2 problemas de configuración.
+❌ Por favor, revisa los errores marcados con '❌' en el reporte de arriba antes de continuar.
 
-### 3. Install Dependencies
+🔧 PRÓXIMOS PASOS SUGERIDOS:
+  1. Instala las dependencias de Python faltantes con 'pip install'.
+  3. Configura tu clave de API de Google en un archivo .env. | Self-diagnosis utility that verifies dependencies, credentials, and key files before running the agent. |
+|  | Minimal Python dependencies: , , . |
+|  | Rolling log file regenerated every time the MCP server starts. |
 
-Install all required Python packages using pip:
+## 3. Prerequisites
+- Python 3.8 or newer (3.10+ recommended).
+-  available on the PATH.
+- Valid credentials for an accessible XWiki instance.
+- Google AI Studio API key for ADK-compatible models.
+- Optional but recommended: a virtual environment ( or ).
 
-```bash
-# Install all dependencies from requirements.txt
-pip install -r requirements.txt
-```
+## 4. Installation
+1. Create and activate a virtual environment (optional):
+   <pre><code>python -m venv .venv
+   # Windows
+   .\.venv\Scripts\activate
+   # macOS/Linux
+   source .venv/bin/activate</code></pre>
+2. Install the dependencies:
+   <pre><code>pip install --upgrade pip
+   pip install -r requirements.txt</code></pre>
 
-### 4. Set Up Gemini API Key (for the ADK Agent)
+## 5. Configuration
+1. Create a  file in the project root with the required variables:
+   <pre><code>GOOGLE_API_KEY=AIza...                    # Google AI Studio key
+MODEL_NAME=models/gemini-1.5-pro          # ADK-compatible model name
+XWIKI_URL=https://<your-instance>/xwiki   # Base URL for XWiki
+XWIKI_USER=<username>
+XWIKI_PASS=<password>
+XWIKI_WIKI_NAME=xwiki                     # Change if your wiki uses a different ID</code></pre>
+   Never commit or share these secrets.
 
-The ADK agent in this project uses a Gemini model. You'll need a Gemini API key.
+2. If you prefer not to rely on environment variables, you can override the constants inside , but loading them from  is safer for production deployments.
 
-1.  Create or use an existing [Google AI Studio](https://aistudio.google.com/) account.
-2.  Get your Gemini API key from the [API Keys section](https://aistudio.google.com/app/apikeys).
-3.  Set the API key as an environment variable. Create a `.env` file in the **root of the `adk-mcp` project** (i.e., next to the `local_mcp` folder and `readme.md`):
+3. Adjust  when you need a different tone, tool policy, or escalation strategy for the agent.
 
-    ```env
-    # .env
-    GOOGLE_API_KEY=your_gemini_api_key_here
-    ```
-    The `server.py` and `agent.py` will load this key.
+## 6. Running the Stack
+1. (Optional) Run the diagnosis script to validate the environment:
+   <pre><code>python xwiki_agent/diagnosis_script.py</code></pre>
+   The report highlights missing dependencies, environment variables, or misconfigurations.
 
-### 5. Create the SQLite Database and Tables
+2. Start the MCP server over stdio:
+   <pre><code>python xwiki_agent/server.py</code></pre>
+   The server registers every function listed in  and streams logs to .
 
-The project includes a script to create and populate the SQLite database (`database.db`) with some initial tables (`users`, `todos`) and dummy data.
+3. In a separate terminal, launch the ADK agent for a local dry run:
+   <pre><code>python xwiki_agent/agent.py</code></pre>
+   The script spins up an in-memory session () and sends a sample prompt so you can verify the available tools and overall wiring.
 
-Navigate to the `local_mcp` directory and run the script:
-```bash
-cd local_mcp
-python3 create_db.py
-cd ..
-```
-This will create `local_mcp/database.db` if it doesn't already exist.
+## 7. Exposed MCP Tools
+| Tool | Parameters | Description |
+| --- | --- | --- |
+|  | ,  | Retrieves page content in XWiki 2.1 syntax. |
+|  | , , ,  | Creates or updates pages and returns the absolute URL when available. |
+|  |  | Performs a global search across the wiki. |
+|  |  | Lists every page within a given space. |
+|  | - | Returns the spaces (folders) defined in the wiki. |
 
-## Running the Agent and MCP Server
+Each function is wrapped by  and translated to MCP schema so the agent can invoke it dynamically.
 
-The ADK agent (`local_mcp/agent.py`) is configured to automatically start the MCP server (`local_mcp/server.py`) when it initializes its MCP toolset.
+## 8. Logging and Monitoring
+- The MCP server configures a  that overwrites  on each start. Inspect this file to trace tool calls, API responses, and HTTP failures.
+- Consider adding a console handler or rotating logs if you deploy the server to a long-running environment.
 
-To run the agent:
+## 9. Diagnostics and Quality Gates
+-  checks the Python version, required packages, critical files, environment variables, and XWiki credentials before you ship.
+- Extend the script with connectivity probes (for example, a sandboxed  against a health endpoint) if you need stronger guarantees before starting the agent.
 
-1.  Ensure your virtual environment is active and you are in the root directory of the `adk-mcp` project.
-2.  Execute the agent script:
+## 10. Troubleshooting
+- **401/403 responses from XWiki**: double-check  and , and confirm the account has sufficient API permissions.
+- ****: ensure the  file is in the repository root and that  loads it.
+- **Network timeouts**: verify that the machine running the agent can reach the XWiki host (proxies, VPN requirements, firewalls, and SSL certificates often cause issues).
+- **"Tool not found" messages**: confirm the function has been added to  and that the agent prompt references the exact same name.
 
-    ```bash
-    python3 local_mcp/agent.py
-    ```
+## 11. Suggested Next Steps
+- Harden secret management by sourcing XWiki credentials from a secure vault service or OS-level keychain.
+- Swap  for a persistent alternative if you plan to keep long-lived conversations.
+- Automate deployment with process managers (for example,  or ) to keep the MCP server online.
 
-This will:
-- Start the `agent.py` script.
-- The agent, upon initializing the `MCPToolset`, will execute the `python3 local_mcp/server.py` command.
-- The `server.py` (MCP server) will start and listen for tool calls from the agent via stdio.
-- The agent will then be ready to process your instructions (which you would typically provide in a client application or test environment that uses this agent).
+## 12. Error-Rate Measurement Tests
+- Build replayable interaction transcripts and measure tool-call success versus failure to quantify the agent's error rate.
+- Add contract tests around each MCP tool using mocked XWiki responses so regressions surface before hitting the live wiki.
+- Track latency and failure metrics per tool invocation to inform retry logic or backoff strategies.
 
-You should see log output from both the agent (if any) and the MCP server (in `local_mcp/mcp_server_activity.log`, and potentially to the console if you uncommented the stream handler in `server.py`).
-
-## Additional Setup for Other MCP Servers (Node.js & Docker)
-
-While the local SQLite MCP server in this specific project (`local_mcp/server.py`) only requires Python for its own execution, you might want to use this ADK agent to connect to *other* MCP servers that have different runtime dependencies. Two common dependencies for such external MCP servers are Node.js (which provides `npx` for running JavaScript-based servers) and Docker (for servers distributed as Docker images).
-
-If you plan to use MCP servers requiring these, here's how to set them up:
-
-### Node.js and npx
-
-`npx` is a package runner tool that comes with `npm` (Node Package Manager), which is included with Node.js. It's often used to run MCP servers built with Node.js without needing to install them globally.
-
--   **Installation**: Download and install Node.js (which includes `npm` and `npx`) from the [official Node.js website](https://nodejs.org/). It is recommended to install the LTS (Long Term Support) version.
--   **Verification**: After installation, open a new terminal or command prompt window and verify the installations by typing:
-    ```bash
-    node -v
-    npm -v
-    npx -v
-    ```
-    You should see version numbers printed for each command, confirming they are installed and in your system's PATH.
-
-### Docker
-
-Docker allows applications to be packaged and run in isolated environments called containers. Some MCP servers are distributed as Docker images, making them easy to run across different operating systems.
-
--   **Installation**: Download and install Docker Desktop from the [official Docker website](https://www.docker.com/products/docker-desktop/). Docker Desktop is available for Windows, macOS, and Linux and provides a graphical interface as well as command-line tools.
--   **Post-Installation**: Ensure Docker Desktop is running after installation, as this starts the Docker daemon (the background service that manages containers).
--   **Verification**: Open a terminal or command prompt and verify the Docker installation by typing:
-    ```bash
-    docker --version
-    # You can also run a test container to ensure Docker is working correctly:
-    # docker run hello-world
-    ```
-    The first command should display your Docker version. Running `docker run hello-world` will download and run a small test image, confirming Docker is operational.
-
-Setting up these tools will broaden the range of MCP servers your ADK agent can potentially interact with.
-
-## Available Database Tools (Exposed by MCP Server)
-
-The `local_mcp/server.py` exposes the following tools for the ADK agent to use:
-
--   **`list_db_tables(dummy_param: str) -> dict`**: Lists all tables in the database.
-    *   *Note*: Requires a `dummy_param` string due to current ADK schema generation behavior; the agent's instructions guide it to provide a default.
--   **`get_table_schema(table_name: str) -> dict`**: Retrieves the schema (column names and types) for a specified table.
--   **`query_db_table(table_name: str, columns: str, condition: str) -> list[dict]`**: Queries a table.
-    *   `columns`: Comma-separated list of columns (e.g., "id, username") or "*" for all.
-    *   `condition`: SQL WHERE clause (e.g., "email LIKE '%@example.com'"). The agent is instructed to use "1=1" if no condition is implied.
--   **`insert_data(table_name: str, data: dict) -> dict`**: Inserts a new row into a table.
-    *   `data`: A dictionary where keys are column names and values are the corresponding data for the new row.
--   **`delete_data(table_name: str, condition: str) -> dict`**: Deletes rows from a table based on a condition.
-    *   *Note*: The condition cannot be empty as a safety measure.
-
-The agent (`local_mcp/agent.py`) has specific instructions on how to use these tools effectively, including using smart defaults for parameters if not explicitly provided by the end-user's request.
-
-## Troubleshooting
-
--   **`No such file or directory` for `server.py`**:
-    *   Ensure `PATH_TO_YOUR_MCP_SERVER_SCRIPT` in `local_mcp/agent.py` correctly points to `local_mcp/server.py`. The current setup uses `(Path(__file__).parent / "server.py").resolve()`, which should be correct after the folder consolidation.
--   **`McpError: Input must be an instance of Schema, got <class 'NoneType'>` (Client-side Error)**:
-    *   This error might occur if `adk_to_mcp_tool_type` in `server.py` generates a `None` input schema for a tool. The `list_db_tables` tool in `server.py` includes a `dummy_param` as a workaround for this known issue with parameter-less functions. The server also has a patch to provide a default schema if one is `None`.
--   **Database Errors (e.g., "no such table")**:
-    *   Ensure you have run `python3 local_mcp/create_db.py` to create the `database.db` file and its tables.
-    *   Verify the `DATABASE_PATH` in `local_mcp/server.py` correctly points to `local_mcp/database.db`.
--   **API Key Issues**:
-    *   Make sure your `GOOGLE_API_KEY` is correctly set in the `.env` file in the project root and that the file is being loaded.
--   **MCP Server Log**:
-    *   Check `local_mcp/mcp_server_activity.log` for detailed logs from the MCP server, which can help diagnose issues with tool calls or database operations.
-
-## Future Enhancements (Ideas)
-- Add an "update_data" tool to the MCP server.
-- Implement more sophisticated error handling and reporting in the server tools.
-- Develop a simple client application (e.g., a CLI or basic web UI) to interact with the ADK agent.
+## 13. Parallel or Hierarchical Agent Integration
+- Experiment with orchestration frameworks that support parallel agents handing off work, with this MCP server acting as a shared execution layer.
+- Prototype a hierarchical setup where a planner agent decomposes goals and delegates XWiki operations to this agent as a specialist.
+- Define communication protocols (messages, shared state, or memory stores) so agents avoid conflicting writes when operating concurrently.
