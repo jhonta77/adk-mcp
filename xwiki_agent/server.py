@@ -80,6 +80,34 @@ def _load_request_timeout(default_connect: float = 3.05, default_read: float = 1
 
 REQUEST_TIMEOUT = _load_request_timeout()
 
+
+
+_PAGE_CONTENT_MAX_CHARS_ENV = "XWIKI_PAGE_MAX_CHARS"
+_DEFAULT_PAGE_CONTENT_MAX_CHARS = 1500
+
+def _read_positive_int(env_name: str, default: int) -> int:
+    value = os.environ.get(env_name)
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logging.warning("Valor invalido para %s (%s); se usara %d.", env_name, value, default)
+        return default
+    if parsed <= 0:
+        logging.warning("Valor para %s debe ser mayor a 0; se usara %d.", env_name, default)
+        return default
+    return parsed
+
+def _truncate_text_field(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    if max_chars <= 3:
+        return text[:max_chars], True
+    return text[: max_chars - 3] + "...", True
+
+PAGE_CONTENT_MAX_CHARS = _read_positive_int(_PAGE_CONTENT_MAX_CHARS_ENV, _DEFAULT_PAGE_CONTENT_MAX_CHARS)
+
 # --- Utilidades internas ---
 # Estas funciones de apoyo encapsulan la manipulación de rutas REST, la
 # validación de parámetros y la extracción de estructuras desde las respuestas
@@ -167,8 +195,17 @@ def get_page(space_name: str, page_name: str) -> dict:
         content_text = content_element.text or ''
         title_element = root.find('xwiki:title', namespace)
         page_title = title_element.text if title_element is not None and title_element.text else page_name
+        trimmed_content, was_truncated = _truncate_text_field(content_text, PAGE_CONTENT_MAX_CHARS)
 
-        return {"success": True, "content": content_text, "title": page_title}
+        payload = {"success": True, "content": trimmed_content, "title": page_title}
+        if was_truncated:
+            payload["content_truncated"] = True
+            payload["original_content_length"] = len(content_text)
+            payload["notice"] = (
+                "El contenido completo de la pagina se trunco para reducir el tamano de la respuesta.                 "Ajusta XWIKI_PAGE_MAX_CHARS si necesitas mas detalle."
+            )
+
+        return payload
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else None
         if status == 404:

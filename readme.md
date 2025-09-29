@@ -71,6 +71,7 @@ XWIKI_WIKI_NAME=xwiki                     # Change if your wiki uses a different
 | `search_pages` | `query` | Performs a global search across the wiki. |
 | `list_pages` | `space_name` | Lists every page within a given space. |
 | `list_spaces` | - | Returns the spaces (folders) defined in the wiki. |
+| `describe_space_tree` | `space_path?`, `depth?` | Devuelve la jerarquía de subespacios y páginas comenzando en `space_path` hasta una `depth` máxima. |
 
 Each function is wrapped by `google.adk.tools.function_tool.FunctionTool` and translated to MCP schema so the agent can invoke it dynamically.
 
