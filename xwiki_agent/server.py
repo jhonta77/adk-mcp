@@ -3,9 +3,12 @@ import asyncio  # Para operaciones asíncronas.
 import json  # Para codificar y decodificar JSON.
 import logging  # Para registrar información, advertencias y errores.
 import os  # Para interactuar con el sistema operativo (p. ej., rutas de archivos).
-import sys  # Para interactuar con el intérprete de Python (p. ej., argumentos de línea de comandos).
+import sys  # Para interactuar con el interprete de Python (p. ej., argumentos de linea de comandos).
+import re  # Para manejar separadores en rutas de espacios.
 import requests  # Para realizar peticiones HTTP a la API de XWiki.
 import xml.etree.ElementTree as ET  # Para analizar respuestas XML de XWiki.
+from xml.sax.saxutils import escape  # Para escapar valores en XML.
+from urllib.parse import quote  # Para codificar segmentos de la URL.
 from requests.auth import HTTPBasicAuth  # Para la autenticación básica en las peticiones.
 
 # Importaciones específicas del framework MCP (Multi-Capability Protocol).
@@ -22,16 +25,22 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 # Carga las variables de entorno desde un archivo .env para la configuración.
-load_dotenv()
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=dotenv_path)
 
 # --- Configuración de la Conexión a XWiki ---
-# Define las credenciales y la URL para conectarse a la instancia de XWiki.
-# Es recomendable gestionar estas credenciales de forma segura, por ejemplo, usando variables de entorno.
-XWIKI_URL = "https://xwiki.cloudmanufaktur.digital/xwiki"
-XWIKI_USER = "KarolineRingsdorf"
-XWIKI_PASS = "=wtI2<04/Hs^"
-XWIKI_WIKI_NAME = "xwiki"  # Nombre de la wiki a la que nos conectamos.
-
+# Las credenciales se cargan desde variables de entorno para evitar exponerlas en código.
+# Si alguno de estos valores falta, las peticiones HTTP devolverán error (lo manejamos más adelante).
+XWIKI_URL = os.environ.get("XWIKI_URL")
+XWIKI_USER = os.environ.get("XWIKI_USER")
+XWIKI_PASS = os.environ.get("XWIKI_PASS")
+XWIKI_WIKI_NAME = "xwiki"  # Nombre por defecto de la wiki virtual.
+# Fallback opcional de espacios conocidos cuando la API no expone la jerarquía.
+FALLBACK_SPACES = [
+    seg.strip()
+    for seg in os.environ.get("XWIKI_FALLBACK_SPACES", "Main").split(",")
+    if seg.strip()
+]
 # --- Configuración del Logging ---
 # Configura un sistema de logging para registrar la actividad del servidor en un archivo.
 # Esto es crucial para la depuración y el monitoreo.
@@ -44,79 +53,185 @@ logging.basicConfig(
     ],
 )
 
+# Timeout por defecto para peticiones HTTP (conexion, lectura).
+def _load_request_timeout(default_connect: float = 3.05, default_read: float = 10.0) -> tuple[float, float]:
+    '''Obtiene los timeouts de conexion/lectura desde las variables de entorno.'''
+    connect_env = os.environ.get("XWIKI_CONNECT_TIMEOUT")
+    read_env = os.environ.get("XWIKI_READ_TIMEOUT")
+    try:
+        connect_timeout = float(connect_env) if connect_env else default_connect
+    except (TypeError, ValueError):
+        logging.warning(
+            "Valor invalido para XWIKI_CONNECT_TIMEOUT (%s); se usara %.2f s.",
+            connect_env,
+            default_connect,
+        )
+        connect_timeout = default_connect
+    try:
+        read_timeout = float(read_env) if read_env else default_read
+    except (TypeError, ValueError):
+        logging.warning(
+            "Valor invalido para XWIKI_READ_TIMEOUT (%s); se usara %.2f s.",
+            read_env,
+            default_read,
+        )
+        read_timeout = default_read
+    return (connect_timeout, read_timeout)
+
+REQUEST_TIMEOUT = _load_request_timeout()
+
+# --- Utilidades internas ---
+# Estas funciones de apoyo encapsulan la manipulación de rutas REST, la
+# validación de parámetros y la extracción de estructuras desde las respuestas
+# JSON/XML de XWiki. Mantenerlas aquí nos permite reutilizarlas en todas las
+# herramientas sin duplicar lógica.
+
+
+def _encode_segment(value: str, field_name: str) -> str:
+    """Valida un parámetro y devuelve una versión segura para la URL."""
+    if value is None or not str(value).strip():
+        raise ValueError(f"El parámetro '{field_name}' no puede estar vacío.")
+    return quote(str(value).strip(), safe="")
+
+
+def _build_space_url(space_segments: list[str], suffix: str) -> str:
+    """Construye la URL REST para un espacio (y sus subespacios)."""
+    # Comenzamos desde la raíz /rest/wikis/<wiki> y agregamos cada segmento de
+    # espacio. XWiki representa subespacios como rutas anidadas: espacios/A/spaces/B/...
+    url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}"
+    for idx, segment in enumerate(space_segments):
+        url += f"/spaces/{_encode_segment(segment, f'space_segment[{idx}]')}"
+    return url + suffix
+
+
+def _extract_items(data: dict, collection_key: str, item_key: str) -> list[dict]:
+    """Extrae listas anidadas que XWiki devuelve como objetos."""
+    # Dependiendo del endpoint, XWiki puede responder "pages": {"page": [...]}
+    # o simplemente "pages": [...]. Esta función lo homogeneiza a una lista.
+    collection = data.get(collection_key, [])
+    if isinstance(collection, dict):
+        return collection.get(item_key, []) or []
+    if isinstance(collection, list):
+        return collection
+    return []
+
+
+def _normalise_space_path(space_path: str | None) -> list[str]:
+    """Convierte el espacio en una lista de segmentos normalizados."""
+    if not space_path:
+        return []
+    raw = str(space_path).strip()
+    if not raw:
+        return []
+    cleaned = raw.replace('\\', '/')
+    chunks = re.split(r'[\\/]+', cleaned)
+    segments: list[str] = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        for part in (seg.strip() for seg in chunk.split('.') if seg.strip()):
+            segments.append(part)
+    if not segments:
+        raise ValueError("El parametro 'space_path' no puede estar vacio tras normalizar.")
+    return segments
 # --- Funciones de Herramientas para la API de XWiki ---
 # Estas funciones interactúan directamente con la API REST de XWiki.
 
 def get_page(space_name: str, page_name: str) -> dict:
-    """Recupera el contenido de una página específica de XWiki."""
-    api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/spaces/{space_name}/pages/{page_name}"
+    """Recupera contenido y metadatos basicos de una pagina de XWiki.
+
+    Devuelve un diccionario con `success` y, en caso de exito, `content` y `title`."""
+    try:
+        space_segments = _normalise_space_path(space_name)
+        if not space_segments:
+            raise ValueError("El parametro 'space_name' no puede estar vacio.")
+        encoded_page = _encode_segment(page_name, "page_name")
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+
+    api_url = _build_space_url(space_segments, f"/pages/{encoded_page}")
     try:
         response = requests.get(
             api_url,
             auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
-            headers={"Accept": "application/xml"}  # Solicitamos la respuesta en formato XML.
+            headers={"Accept": "application/xml"},
+            timeout=REQUEST_TIMEOUT,
         )
-        response.raise_for_status()  # Lanza un error si la petición no fue exitosa (código 2xx).
-        root = ET.fromstring(response.content)  # Analiza el XML.
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
         namespace = {'xwiki': 'http://www.xwiki.org'}
         content_element = root.find('xwiki:content', namespace)
-        if content_element is not None:
-            return {"success": True, "content": content_element.text}
-        else:
-            return {"success": False, "message": "No se pudo encontrar el contenido en el XML de la página."}
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error al obtener la página: {e}")
-        return {"success": False, "message": str(e)}
-    except ET.ParseError as e:
-        logging.error(f"Error al analizar el XML: {e}")
-        return {"success": False, "message": f"Error al analizar el XML: {e}"}
+        if content_element is None:
+            return {"success": False, "message": "No se encontro la seccion de contenido en el XML de la pagina."}
+
+        content_text = content_element.text or ''
+        title_element = root.find('xwiki:title', namespace)
+        page_title = title_element.text if title_element is not None and title_element.text else page_name
+
+        return {"success": True, "content": content_text, "title": page_title}
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 404:
+            space_path = "/".join(space_segments)
+            message = f"La pagina '{page_name}' no se encontro en el espacio '{space_path}'."
+            return {"success": False, "message": message}
+        logging.error("Error HTTP al obtener la pagina '%s' en '%s': %s", page_name, space_segments, exc)
+        return {"success": False, "message": str(exc)}
+    except requests.exceptions.RequestException as exc:
+        logging.error("Error al obtener la pagina '%s' en '%s': %s", page_name, space_segments, exc)
+        return {"success": False, "message": str(exc)}
+    except ET.ParseError as exc:
+        logging.error("Error al analizar el XML: %s", exc)
+        return {"success": False, "message": f"Error al analizar el XML: {exc}"}
 
 def create_or_update_page(space_name: str, page_name: str, content: str, title: str = "") -> dict:
-    """Crea una nueva página o actualiza una existente en XWiki."""
-    api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/spaces/{space_name}/pages/{page_name}"
+    """Crea una nueva pagina o actualiza una existente en XWiki."""
+    if content is None:
+        return {"success": False, "message": "El contenido no puede ser nulo."}
+
+    try:
+        space_segments = _normalise_space_path(space_name)
+        if not space_segments:
+            raise ValueError("El parametro 'space_name' no puede estar vacio.")
+        encoded_page = _encode_segment(page_name, "page_name")
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+
+    api_url = _build_space_url(space_segments, f"/pages/{encoded_page}")
     page_title = title if title else page_name
-    # Construye el cuerpo de la petición en formato XML.
-    xml_payload = f'''
-    <page xmlns="http://www.xwiki.org">
-      <title>{page_title}</title>
-      <syntax>xwiki/2.1</syntax>
-      <content>{content}</content>
-    </page>
-    '''
+    safe_title = escape(str(page_title))
+    safe_content = escape(str(content))
+    xml_payload = (
+        f"<?xml version='1.0' encoding='UTF-8'?>"
+        f"<page>"
+        f"  <title>{safe_title}</title>"
+        f"  <content>{safe_content}</content>"
+        f"</page>"
+    )
+    payload = "\n".join(xml_payload)
+
+    headers = {"Content-Type": "application/xml", "Accept": "application/json"}
+
     try:
         response = requests.put(
             api_url,
+            data=payload.encode('utf-8'),
             auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
-            headers={"Content-Type": "application/xml"},
-            data=xml_payload.encode('utf-8')
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
-
-        page_url = None
-        try:
-            # Intenta extraer la URL de la página de la respuesta.
-            root = ET.fromstring(response.content)
-            namespace = {'xwiki': 'http://www.xwiki.org'}
-            url_element = root.find('xwiki:xwikiAbsoluteUrl', namespace)
-            if url_element is not None:
-                page_url = url_element.text
-        except ET.ParseError:
-            pass # Ignora el error si la respuesta no es XML (p. ej., en un código 204 No Content).
-
-        if response.status_code == 201: # Creado
-            return {"success": True, "message": f"Página '{page_name}' creada exitosamente.", "url": page_url}
-        elif response.status_code in [200, 202, 204]: # Actualizado
-            return {"success": True, "message": f"Página '{page_name}' actualizada exitosamente (Estado: {response.status_code}).", "url": page_url}
-        else:
-            return {"success": False, "message": f"Página '{page_name}' devolvió el estado {response.status_code}. Detalles: {response.text}"}
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error al crear/actualizar la página: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": True, "message": "Pagina creada o actualizada correctamente."}
+    except requests.exceptions.RequestException as exc:
+        logging.error("Error al crear/actualizar la pagina '%s' en '%s': %s", page_name, space_segments, exc)
+        return {"success": False, "message": str(exc)}
 
 def search_pages(query: str) -> dict:
     """Busca páginas en XWiki que coincidan con un término de búsqueda."""
     api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/search"
     try:
+        # 'keywords' permite buscar por título, contenidos, etc. Solicitamos JSON
+        # para recibir metadatos estructurados.
         response = requests.get(
             api_url,
             auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
@@ -128,9 +243,17 @@ def search_pages(query: str) -> dict:
         logging.error(f"Error al buscar páginas: {e}")
         return {"success": False, "message": str(e)}
 
+
 def list_pages(space_name: str) -> dict:
-    """Lista todas las páginas en un espacio determinado de XWiki."""
-    api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/spaces/{space_name}/pages"
+    """Lista todas las paginas en un espacio determinado de XWiki."""
+    try:
+        space_segments = _normalise_space_path(space_name)
+        if not space_segments:
+            raise ValueError("El parametro 'space_name' no puede estar vacio.")
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+
+    api_url = _build_space_url(space_segments, "/pages")
     try:
         response = requests.get(
             api_url,
@@ -138,14 +261,16 @@ def list_pages(space_name: str) -> dict:
             headers={"Accept": "application/json"}
         )
         response.raise_for_status()
-        return {"success": True, "pages": response.json().get("pages", [])}
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error al listar las páginas del espacio '{space_name}': {e}")
-        return {"success": False, "message": str(e)}
+        pages = response.json().get("pages", [])
+        return {"success": True, "pages": pages}
+    except requests.exceptions.RequestException as exc:
+        logging.error("Error al listar las paginas del espacio '%s': %s", space_name, exc)
+        return {"success": False, "message": str(exc)}
 
 def list_spaces() -> dict:
     """Lista todos los espacios (carpetas) en la wiki."""
     api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/spaces"
+    print(f"Intentando acceder a: {api_url}")
     try:
         response = requests.get(
             api_url,
@@ -157,6 +282,114 @@ def list_spaces() -> dict:
     except requests.exceptions.RequestException as e:
         logging.error(f"Error listing spaces: {e}")
         return {"success": False, "message": str(e)}
+
+
+def _fetch_spaces(space_segments: list[str]) -> list[dict]:
+    """Recupera los subespacios de una ruta dada."""
+    # Construimos la URL hacia /spaces y pedimos JSON (más liviano que XML).
+    url = _build_space_url(space_segments, "/spaces")
+    try:
+        response = requests.get(
+            url,
+            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        items = _extract_items(data, "spaces", "space")
+        # Si la API devuelve vacío y estamos en la raíz, devolvemos los fallback.
+        if not items and not space_segments:
+            return [{"name": name} for name in FALLBACK_SPACES]
+        return items
+    except requests.exceptions.RequestException as exc:
+        if not space_segments and FALLBACK_SPACES:
+            # En caso de error al listar el root, retornamos espacios conocidos.
+            logging.warning("Fallo al obtener espacios (%s). Usando fallback.", exc)
+            return [{"name": name} for name in FALLBACK_SPACES]
+        raise
+
+
+def _fetch_pages(space_segments: list[str]) -> list[dict]:
+    """Recupera las páginas de un espacio concreto."""
+    # Este endpoint puede devolver 404 si el espacio no contiene páginas.
+    url = _build_space_url(space_segments, "/pages")
+    response = requests.get(
+        url,
+        auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+        headers={"Accept": "application/json"},
+    )
+    response.raise_for_status()
+    data = response.json()
+    return _extract_items(data, "pages", "page")
+
+
+def _explore_space(space_segments: list[str], depth: int) -> dict:
+    """Construye recursivamente la jerarquía de espacios/páginas."""
+    # Cada nodo del árbol incluye el nombre del espacio, las páginas directas y
+    # una lista de subespacios (que a su vez contienen la misma estructura).
+    node = {
+        "space": "/".join(space_segments) if space_segments else "",
+        "pages": [],
+        "spaces": [],
+    }
+
+    try:
+        pages = _fetch_pages(space_segments)
+        node["pages"] = [page.get("name") for page in pages if page.get("name")]
+    except requests.exceptions.HTTPError as exc:
+        # Un 404 en páginas es normal si el espacio solo contiene subespacios.
+        if exc.response is None or exc.response.status_code != 404:
+            raise
+
+    if depth <= 0:
+        return node
+
+    subspaces = _fetch_spaces(space_segments)
+    for entry in subspaces:
+        name = entry.get("name")
+        if not name:
+            continue
+        child_segments = space_segments + [name]
+        try:
+            # Avanzamos un nivel más profundo. restamos 1 al depth para evitar
+            # exploraciones infinitas.
+            child_node = _explore_space(child_segments, depth - 1)
+        except requests.exceptions.RequestException as exc:
+            # En caso de error al conectar, devolvemos la descripción del fallo
+            # para que el usuario pueda depurar qué subespacio falló.
+            child_node = {
+                "space": "/".join(child_segments),
+                "error": str(exc),
+            }
+        node["spaces"].append(child_node)
+
+    return node
+
+
+def describe_space_tree(space_path: str = "", depth: int = 2) -> dict:
+    """Devuelve la jerarquía de subespacios y páginas comenzando en `space_path`.
+
+    Args:
+        space_path: Ruta del espacio (separada por '/'). Si se omite, se usa la raíz.
+        depth: Profundidad máxima de exploración (>=0).
+    """
+
+    if depth < 0:
+        return {"success": False, "message": "El parámetro 'depth' debe ser mayor o igual a 0."}
+
+    try:
+        segments = _normalise_space_path(space_path)
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+
+    try:
+        # _explore_space devuelve un diccionario con toda la jerarquía a partir
+        # del espacio indicado. Ese árbol se entrega directamente al agente.
+        tree = _explore_space(segments, depth)
+        return {"success": True, "tree": tree}
+    except requests.exceptions.RequestException as exc:
+        logging.error("Error al explorar el espacio '%s': %s", space_path or "root", exc)
+        return {"success": False, "message": str(exc)}
 
 # --- Configuración del Servidor MCP ---
 # Crea una instancia del servidor MCP que gestionará las herramientas.
@@ -170,6 +403,7 @@ ADK_XWIKI_TOOLS = {
     "search_pages": FunctionTool(func=search_pages),
     "list_pages": FunctionTool(func=list_pages),
     "list_spaces": FunctionTool(func=list_spaces),
+    "describe_space_tree": FunctionTool(func=describe_space_tree),
 }
 
 # --- Implementación de los Endpoints del Servidor MCP ---
@@ -225,26 +459,75 @@ async def run_mcp_stdio_server():
 # Este bloque se ejecuta solo cuando el script es llamado directamente.
 if __name__ == "__main__":
     # --- BLOQUE DE PRUEBAS LOCALES ---
-    # Este bloque contiene funciones para probar las herramientas de XWiki localmente
-    # sin necesidad de un agente. Es muy útil para el desarrollo y la depuración.
-    
-    # (El bloque de pruebas detallado se omite aquí por brevedad, pero su propósito es
-    # verificar que cada función de herramienta (get_page, list_spaces, etc.) funciona
-    # como se espera. Se puede ejecutar con `python server.py all` o `python server.py <nombre_prueba>`)
+    # Este bloque permite probar las herramientas de XWiki localmente.
+    # Uso: python server.py <nombre_prueba>
+    # Pruebas disponibles: all, list_spaces, list_pages, get_page, create_page, search, tree
 
-    # --- BLOQUE DEL SERVIDOR MCP ---
-    # Para iniciar el servidor real, el bloque de pruebas de arriba debe ser comentado
-    # y este bloque debe estar activo.
-    
-    logging.info("Lanzando servidor MCP de XWiki vía stdio...")
-    try:
-        # Inicia el bucle de eventos de asyncio para correr el servidor.
-        asyncio.run(run_mcp_stdio_server())
-    except KeyboardInterrupt:
-        # Permite detener el servidor limpiamente con Ctrl+C.
-        logging.info("Servidor MCP de XWiki detenido por el usuario.")
-    except Exception as e:
-        # Captura cualquier otro error crítico que pueda detener el servidor.
-        logging.critical(f"Servidor MCP de XWiki encontró un error no manejado: {e}", exc_info=True)
-    finally:
-        logging.info("Proceso del servidor MCP de XWiki finalizando.")
+    def run_test(test_func, *args):
+        print(f"--- Ejecutando prueba: {test_func.__name__} ---")
+        try:
+            result = test_func(*args)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"Error durante la prueba: {e}")
+        print("--- Fin de la prueba ---\n")
+
+    # --- Definiciones de las pruebas ---
+    def test_list_spaces():
+        run_test(list_spaces)
+
+    def test_list_pages():
+        # Reemplaza "Main" con un espacio que exista en tu XWiki
+        run_test(list_pages, "Main")
+
+    def test_get_page():
+        # Reemplaza "Main" y "WebHome" con un espacio y página que existan
+        run_test(get_page, "Main", "WebHome")
+
+    def test_create_update_page():
+        run_test(
+            create_or_update_page,
+            "TestSpace",
+            "TestPage",
+            "Este es el contenido de la página de prueba.",
+            "Página de Prueba"
+        )
+
+    def test_search():
+        run_test(search_pages, "test")
+
+    def test_tree():
+        run_test(describe_space_tree, "", 2)
+
+    # --- Lógica para ejecutar las pruebas desde la línea de comandos ---
+    if len(sys.argv) > 1:
+        test_name = sys.argv[1]
+        tests = {
+            "list_spaces": test_list_spaces,
+            "list_pages": test_list_pages,
+            "get_page": test_get_page,
+            "create_page": test_create_update_page,
+            "search": test_search,
+            "tree": test_tree,
+        }
+
+        if test_name == "all":
+            for name, test_func in tests.items():
+                test_func()
+        elif test_name in tests:
+            tests[test_name]()
+        else:
+            print(f"Prueba '{test_name}' no encontrada. Pruebas disponibles: {list(tests.keys())}")
+            
+    else:
+        # --- BLOQUE DEL SERVIDOR MCP ---
+        # Si no se especifica una prueba, se inicia el servidor.
+        logging.info("Lanzando servidor MCP de XWiki vía stdio...")
+        try:
+            asyncio.run(run_mcp_stdio_server())
+        except KeyboardInterrupt:
+            logging.info("Servidor MCP de XWiki detenido por el usuario.")
+        except Exception as e:
+            logging.critical(f"Servidor MCP de XWiki encontró un error no manejado: {e}", exc_info=True)
+        finally:
+            logging.info("Proceso del servidor MCP de XWiki finalizando.")
