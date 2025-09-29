@@ -108,6 +108,40 @@ def _truncate_text_field(text: str, max_chars: int) -> tuple[str, bool]:
 
 PAGE_CONTENT_MAX_CHARS = _read_positive_int(_PAGE_CONTENT_MAX_CHARS_ENV, _DEFAULT_PAGE_CONTENT_MAX_CHARS)
 
+
+_LINK_WITH_URL_PATTERN = re.compile(r"\[\[(?P<label>[^>\]]+?)>>(?:url:)?(?P<target>[^\]]+?)\]\]")
+
+_HEADING_PATTERN = re.compile(r"==+\s*(.*?)\s*==+")
+
+_BOLD_PATTERN = re.compile(r"\*\*(.*?)\*\*", re.DOTALL)
+
+_ITALIC_PATTERN = re.compile(r"//(.*?)//", re.DOTALL)
+
+
+def _simplify_wiki_markup(text: str) -> str:
+
+    if not text:
+
+        return ""
+
+    simplified = _LINK_WITH_URL_PATTERN.sub(lambda m: f"{m.group('label').strip()} ({m.group('target').strip()})", text)
+
+    simplified = re.sub(r"\{\{\s*toc\s*/\s*\}\}", "", simplified, flags=re.IGNORECASE)
+
+    simplified = _BOLD_PATTERN.sub(lambda m: m.group(1), simplified)
+
+    simplified = _ITALIC_PATTERN.sub(lambda m: m.group(1), simplified)
+
+    simplified = _HEADING_PATTERN.sub(lambda m: f"\n{m.group(1).strip()}:\n", simplified)
+
+    simplified = simplified.replace('----', '\n')
+
+    simplified = re.sub(r'\n{3,}', '\n\n', simplified)
+
+    return simplified.strip()
+
+
+
 # --- Utilidades internas ---
 # Estas funciones de apoyo encapsulan la manipulación de rutas REST, la
 # validación de parámetros y la extracción de estructuras desde las respuestas
@@ -193,16 +227,18 @@ def get_page(space_name: str, page_name: str) -> dict:
             return {"success": False, "message": "No se encontro la seccion de contenido en el XML de la pagina."}
 
         content_text = content_element.text or ''
+        simplified_content = _simplify_wiki_markup(content_text)
         title_element = root.find('xwiki:title', namespace)
         page_title = title_element.text if title_element is not None and title_element.text else page_name
-        trimmed_content, was_truncated = _truncate_text_field(content_text, PAGE_CONTENT_MAX_CHARS)
+        trimmed_content, was_truncated = _truncate_text_field(simplified_content, PAGE_CONTENT_MAX_CHARS)
 
         payload = {"success": True, "content": trimmed_content, "title": page_title}
         if was_truncated:
             payload["content_truncated"] = True
-            payload["original_content_length"] = len(content_text)
+            payload["original_content_length"] = len(simplified_content)
             payload["notice"] = (
-                "El contenido completo de la pagina se trunco para reducir el tamano de la respuesta.                 "Ajusta XWIKI_PAGE_MAX_CHARS si necesitas mas detalle."
+                "El contenido completo de la pagina se trunco para reducir el tamano de la respuesta. "
+                "Ajusta XWIKI_PAGE_MAX_CHARS si necesitas mas detalle."
             )
 
         return payload
