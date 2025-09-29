@@ -37,18 +37,16 @@ Usuario -> ADK Runner -> Servidor MCP (server.py) -> API REST de XWiki
    pip install -r requirements.txt</code></pre>
 
 ## 5. Configuración
-1. Crear un archivo `.env` en la raíz del proyecto con las variables necesarias:
-   <pre><code>GOOGLE_API_KEY=AIza...                    # Clave de Google AI Studio
-MODEL_NAME=models/gemini-1.5-pro          # Modelo compatible con ADK
-XWIKI_URL=https://<tu-instancia>/xwiki    # URL base de XWiki
-XWIKI_USER=<usuario>
-XWIKI_PASS=<contraseña>
-XWIKI_WIKI_NAME=xwiki                     # Cambia si tu wiki usa otro ID</code></pre>
-   No compartas ni subas estas credenciales al repositorio.
+1. Copia `xwiki_agent/.env` a la raíz del proyecto y renómbralo como `.env` si aún no existe.
+2. Registra las credenciales en un almacén seguro:
+   - Con `keyring`: `keyring set xwiki/adk bot@example.com` y define `XWIKI_KEYRING_SERVICE` / `XWIKI_KEYRING_USERNAME`.
+   - O proporciona un comando en `XWIKI_SECRET_COMMAND` que devuelva `usuario:contraseña`.
+   - Solo si no tienes otra opción, define `XWIKI_USER` y `XWIKI_PASS` directamente como variables de entorno.
+3. Ajusta en `.env` los valores de `XWIKI_URL`, `MODEL_NAME`, `GOOGLE_API_KEY` y cualquier parámetro adicional del agente.
+4. (Opcional) Establece `ADK_SESSION_DB_PATH` para controlar dónde se guarda la base de datos SQLite de sesiones persistentes.
+5. Ejecuta `python -m keyring --list-backends` para confirmar que tu sistema ofrece un almacén seguro compatible.
+6. Ajusta si lo necesitas `XWIKI_SEARCH_MAX_RESULTS`, `XWIKI_SEARCH_SNIPPET_MAX_CHARS` o los costes `GEMINI_*_TOKEN_COST_USD` para adaptar los límites de búsqueda y el cálculo económico.
 
-2. Si prefieres no depender de variables de entorno, puedes sobrescribir las constantes dentro de `xwiki_agent/server.py`. Para despliegues productivos, es más seguro cargarlas desde `.env`.
-
-3. Ajusta `xwiki_agent/prompt.py` cuando necesites un tono distinto, otra política de herramientas o un flujo de escalamiento diferente.
 
 ## 6. Puesta en marcha
 1. (Opcional) Ejecuta el script de diagnóstico para validar el entorno:
@@ -61,7 +59,11 @@ XWIKI_WIKI_NAME=xwiki                     # Cambia si tu wiki usa otro ID</code>
 
 3. En otra terminal, lanza el agente ADK para una prueba local:
    <pre><code>python xwiki_agent/agent.py</code></pre>
-   El script levanta una sesión en memoria (`InMemorySessionService`) y envía un mensaje de ejemplo para validar las herramientas disponibles y el cableado general.
+   El script usa una base de datos SQLite persistente para las sesiones cuando está disponible y recurre a `InMemorySessionService` solo como respaldo. Antes de cada llamada a herramienta imprime los tokens acumulados y el coste estimado.
+
+### Automatización del servidor MCP
+- Copia y ajusta `deploy/systemd/xwiki-mcp.service` para ejecutar el servidor con `systemd` (define `ExecStart`, `EnvironmentFile` y `WorkingDirectory`).
+- Alternativamente, registra `deploy/supervisor/xwiki-mcp.conf` en `supervisord` para reinicios automáticos y control de logs.
 
 ## 7. Herramientas MCP expuestas
 | Herramienta | Parámetros | Descripción |
@@ -84,15 +86,16 @@ Cada función se envuelve con `google.adk.tools.function_tool.FunctionTool` y se
 - Extiende el script con pruebas de conectividad (por ejemplo, un `requests.get` controlado contra un endpoint de salud) si necesitas garantías adicionales antes de iniciar el agente.
 
 ## 10. Solución de problemas
-- **Respuestas 401/403 desde XWiki**: verifica `XWIKI_USER` y `XWIKI_PASS`, y confirma que la cuenta tenga permisos suficientes para la API.
+- **Respuestas 401/403 desde XWiki**: confirma que `XWIKI_URL` sea accesible y que las credenciales estén correctamente registradas en el almacén seguro (ej. `keyring get xwiki/adk bot@example.com`).
 - **`ValueError: Missing XWIKI_URL, GOOGLE_API_KEY or MODEL_NAME`**: asegúrate de que `.env` esté en la raíz del repositorio y que `python-dotenv` lo cargue.
 - **Tiempos de espera o fallos de red**: confirma que la máquina que ejecuta el agente puede alcanzar el host de XWiki (proxies, VPN, firewalls y certificados SSL suelen ser la causa).
 - **Mensajes de "Tool not found"**: verifica que la función esté en `ADK_XWIKI_TOOLS` y que el prompt del agente use exactamente el mismo nombre.
 
 ## 11. Próximos pasos sugeridos
-- Endurece la gestión de secretos obteniendo las credenciales de XWiki desde un servicio de cofres o el almacén seguro del sistema operativo.
-- Sustituye `InMemorySessionService` por una alternativa persistente si planeas mantener conversaciones prolongadas.
-- Automatiza el despliegue con gestores de procesos (por ejemplo, `systemd` o `supervisord`) para mantener el servidor MCP disponible.
+- Añade rotación y envío centralizado de logs (por ejemplo, con `logging.handlers.RotatingFileHandler` o integraciones con tu stack observability).
+- Instrumenta métricas de disponibilidad para el servidor MCP (endpoints de salud, uso de `supervisord` events o sondas de `systemd`).
+- Define pruebas automatizadas que simulen llamadas a herramientas de XWiki con datos controlados para detectar regresiones antes del despliegue.
+
 
 ## 12. Pruebas para medir tasa de error
 - Construye transcripciones reproducibles y mide el éxito o fallo de las llamadas a herramientas para cuantificar la tasa de error del agente.

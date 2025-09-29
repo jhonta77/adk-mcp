@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET  # Para analizar respuestas XML de XWiki.
 from xml.sax.saxutils import escape  # Para escapar valores en XML.
 from urllib.parse import quote  # Para codificar segmentos de la URL.
 from requests.auth import HTTPBasicAuth  # Para la autenticación básica en las peticiones.
+from html import unescape
 
 # Importaciones específicas del framework MCP (Multi-Capability Protocol).
 import mcp.server.stdio
@@ -24,17 +25,37 @@ from mcp import types as mcp_types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
+try:
+    from .secret_manager import (
+        SecretRetrievalError,
+        get_masked_username,
+        load_xwiki_credentials,
+    )
+except ImportError:  # Ejecución directa del script
+    from secret_manager import (  # type: ignore
+        SecretRetrievalError,
+        get_masked_username,
+        load_xwiki_credentials,
+    )
+
 # Carga las variables de entorno desde un archivo .env para la configuración.
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
 # --- Configuración de la Conexión a XWiki ---
-# Las credenciales se cargan desde variables de entorno para evitar exponerlas en código.
-# Si alguno de estos valores falta, las peticiones HTTP devolverán error (lo manejamos más adelante).
+# Las credenciales se obtienen preferentemente desde almacenes seguros.
 XWIKI_URL = os.environ.get("XWIKI_URL")
-XWIKI_USER = os.environ.get("XWIKI_USER")
-XWIKI_PASS = os.environ.get("XWIKI_PASS")
-XWIKI_WIKI_NAME = "xwiki"  # Nombre por defecto de la wiki virtual.
+if not XWIKI_URL:
+    raise RuntimeError("La variable de entorno XWIKI_URL es obligatoria para acceder a la instancia de XWiki.")
+try:
+    _XWIKI_CREDENTIALS = load_xwiki_credentials()
+except SecretRetrievalError as exc:
+    raise RuntimeError(f"No se pudieron cargar credenciales de XWiki: {exc}") from exc
+XWIKI_USER = _XWIKI_CREDENTIALS.username
+XWIKI_PASS = _XWIKI_CREDENTIALS.password
+XWIKI_CREDENTIAL_SOURCE = _XWIKI_CREDENTIALS.source
+XWIKI_WIKI_NAME = os.environ.get("XWIKI_WIKI_NAME", "xwiki")  # Nombre por defecto de la wiki virtual.
+XWIKI_AUTH = HTTPBasicAuth(XWIKI_USER, XWIKI_PASS)
 # Fallback opcional de espacios conocidos cuando la API no expone la jerarquía.
 FALLBACK_SPACES = [
     seg.strip()
@@ -52,6 +73,12 @@ logging.basicConfig(
         logging.FileHandler(LOG_FILE_PATH, mode="w"),  # Escribe los logs en el archivo especificado.
     ],
 )
+
+masked_user = get_masked_username()
+if masked_user:
+    logging.info("Credenciales de XWiki cargadas desde %s para el usuario '%s'.", XWIKI_CREDENTIAL_SOURCE, masked_user)
+else:
+    logging.warning("Credenciales de XWiki no disponibles; revisa la configuración de secret_manager.")
 
 # Timeout por defecto para peticiones HTTP (conexion, lectura).
 def _load_request_timeout(default_connect: float = 3.05, default_read: float = 10.0) -> tuple[float, float]:
@@ -85,6 +112,12 @@ REQUEST_TIMEOUT = _load_request_timeout()
 _PAGE_CONTENT_MAX_CHARS_ENV = "XWIKI_PAGE_MAX_CHARS"
 _DEFAULT_PAGE_CONTENT_MAX_CHARS = 1500
 
+
+
+_SEARCH_MAX_RESULTS_ENV = "XWIKI_SEARCH_MAX_RESULTS"
+_DEFAULT_SEARCH_MAX_RESULTS = 5
+_SEARCH_SNIPPET_MAX_CHARS_ENV = "XWIKI_SEARCH_SNIPPET_MAX_CHARS"
+_DEFAULT_SEARCH_SNIPPET_MAX_CHARS = 280
 def _read_positive_int(env_name: str, default: int) -> int:
     value = os.environ.get(env_name)
     if not value:
@@ -108,6 +141,9 @@ def _truncate_text_field(text: str, max_chars: int) -> tuple[str, bool]:
 
 PAGE_CONTENT_MAX_CHARS = _read_positive_int(_PAGE_CONTENT_MAX_CHARS_ENV, _DEFAULT_PAGE_CONTENT_MAX_CHARS)
 
+SEARCH_MAX_RESULTS = _read_positive_int(_SEARCH_MAX_RESULTS_ENV, _DEFAULT_SEARCH_MAX_RESULTS)
+SEARCH_SNIPPET_MAX_CHARS = _read_positive_int(_SEARCH_SNIPPET_MAX_CHARS_ENV, _DEFAULT_SEARCH_SNIPPET_MAX_CHARS)
+
 
 _LINK_WITH_URL_PATTERN = re.compile(r"\[\[(?P<label>[^>\]]+?)>>(?:url:)?(?P<target>[^\]]+?)\]\]")
 
@@ -116,6 +152,8 @@ _HEADING_PATTERN = re.compile(r"==+\s*(.*?)\s*==+")
 _BOLD_PATTERN = re.compile(r"\*\*(.*?)\*\*", re.DOTALL)
 
 _ITALIC_PATTERN = re.compile(r"//(.*?)//", re.DOTALL)
+
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 def _simplify_wiki_markup(text: str) -> str:
@@ -139,6 +177,69 @@ def _simplify_wiki_markup(text: str) -> str:
     simplified = re.sub(r'\n{3,}', '\n\n', simplified)
 
     return simplified.strip()
+
+
+def _clean_search_snippet(text: str) -> str:
+    """Limpia el snippet devuelto por la API para reducir tokens."""
+    if not text:
+        return ""
+    plain = _HTML_TAG_PATTERN.sub(" ", text)
+    plain = unescape(plain)
+    plain = _simplify_wiki_markup(plain)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return plain
+
+
+def _normalise_search_results(payload: dict) -> dict:
+    """Reduce y estructura los resultados de búsqueda para el agente."""
+    data = payload or {}
+    raw_results = data.get("searchResults")
+    if raw_results is None:
+        raw_results = data.get("searchResult")
+
+    if isinstance(raw_results, list):
+        items = raw_results
+    elif isinstance(raw_results, dict):
+        items = raw_results.get("searchResult") or raw_results.get("result") or []
+        if isinstance(items, dict):
+            items = [items]
+        elif not isinstance(items, list):
+            items = [items] if items else []
+    else:
+        items = []
+
+    simplified: list[dict[str, object]] = []
+    for entry in items[:SEARCH_MAX_RESULTS]:
+        if not isinstance(entry, dict):
+            logging.debug("Resultado de búsqueda no reconocido: %s", entry)
+            continue
+        snippet = _clean_search_snippet(entry.get("highlight", ""))
+        snippet, _ = _truncate_text_field(snippet, SEARCH_SNIPPET_MAX_CHARS)
+        record: dict[str, object] = {
+            "title": entry.get("title") or entry.get("pageName") or entry.get("id"),
+            "url": entry.get("url"),
+            "space": entry.get("space"),
+            "type": entry.get("type"),
+        }
+        page_name = entry.get("pageName")
+        if page_name:
+            record["pageName"] = page_name
+        page_id = entry.get("pageId") or entry.get("id")
+        if page_id:
+            record["pageId"] = page_id
+        score = entry.get("score")
+        if score is not None:
+            record["score"] = score
+        if snippet:
+            record["snippet"] = snippet
+        simplified.append(record)
+    total = len(items)
+    return {
+        "success": True,
+        "results": simplified,
+        "total": total,
+        "truncated": total > len(simplified),
+    }
 
 
 
@@ -215,7 +316,7 @@ def get_page(space_name: str, page_name: str) -> dict:
     try:
         response = requests.get(
             api_url,
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            auth=XWIKI_AUTH,
             headers={"Accept": "application/xml"},
             timeout=REQUEST_TIMEOUT,
         )
@@ -289,7 +390,7 @@ def create_or_update_page(space_name: str, page_name: str, content: str, title: 
         response = requests.put(
             api_url,
             data=payload.encode('utf-8'),
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            auth=XWIKI_AUTH,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
@@ -299,22 +400,67 @@ def create_or_update_page(space_name: str, page_name: str, content: str, title: 
         logging.error("Error al crear/actualizar la pagina '%s' en '%s': %s", page_name, space_segments, exc)
         return {"success": False, "message": str(exc)}
 
-def search_pages(query: str) -> dict:
-    """Busca páginas en XWiki que coincidan con un término de búsqueda."""
+def search_pages(query: str, space_name: str = "") -> dict:
+    """Busca páginas en XWiki, opcionalmente acotadas a un espacio concreto."""
     api_url = f"{XWIKI_URL}/rest/wikis/{XWIKI_WIKI_NAME}/search"
     try:
-        # 'keywords' permite buscar por título, contenidos, etc. Solicitamos JSON
-        # para recibir metadatos estructurados.
         response = requests.get(
             api_url,
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
-            params={"keywords": query, "media": "json"} # Pide los resultados en JSON.
+            auth=XWIKI_AUTH,
+            params={"keywords": query, "media": "json"}
         )
         response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error al buscar páginas: {e}")
-        return {"success": False, "message": str(e)}
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logging.error("Respuesta de búsqueda no es JSON válido: %s", exc)
+            return {"success": False, "message": "La API devolvió una respuesta no válida"}
+        result = _normalise_search_results(payload)
+        if not result.get("success"):
+            return result
+
+        suggest_space_tree = False
+
+        if space_name:
+            try:
+                segments = _normalise_space_path(space_name)
+            except ValueError as exc:
+                return {"success": False, "message": str(exc)}
+            target = "/".join(segments)
+            segments_cf = [seg.casefold() for seg in segments]
+
+            filtered: list[dict[str, object]] = []
+            for item in result.get("results", []):
+                space_value = str(item.get("space", ""))
+                if not space_value:
+                    continue
+                cleaned = space_value.replace("\\", "/")
+                parts = [seg for seg in re.split(r"[\\/\.]+", cleaned) if seg]
+                parts_cf = [seg.casefold() for seg in parts]
+                if parts_cf[: len(segments_cf)] == segments_cf:
+                    filtered.append(item)
+
+            if filtered:
+                result["results"] = filtered
+                result["total"] = len(filtered)
+                result["truncated"] = False
+            else:
+                result["filter_warning"] = (
+                    "No se encontraron coincidencias exactas en el espacio filtrado; se muestran resultados globales."
+                )
+                suggest_space_tree = True
+            result["filtered_space"] = target
+
+        if not result.get("results"):
+            suggest_space_tree = True
+
+        if suggest_space_tree:
+            result["suggest_describe_space_tree"] = True
+
+        return result
+    except requests.exceptions.RequestException as exc:
+        logging.error("Error al buscar páginas: %s", exc)
+        return {"success": False, "message": str(exc)}
 
 
 def list_pages(space_name: str) -> dict:
@@ -330,7 +476,7 @@ def list_pages(space_name: str) -> dict:
     try:
         response = requests.get(
             api_url,
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            auth=XWIKI_AUTH,
             headers={"Accept": "application/json"}
         )
         response.raise_for_status()
@@ -347,7 +493,7 @@ def list_spaces() -> dict:
     try:
         response = requests.get(
             api_url,
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            auth=XWIKI_AUTH,
             headers={"Accept": "application/json"}
         )
         response.raise_for_status()
@@ -364,7 +510,7 @@ def _fetch_spaces(space_segments: list[str]) -> list[dict]:
     try:
         response = requests.get(
             url,
-            auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+            auth=XWIKI_AUTH,
             headers={"Accept": "application/json"},
         )
         response.raise_for_status()
@@ -388,7 +534,7 @@ def _fetch_pages(space_segments: list[str]) -> list[dict]:
     url = _build_space_url(space_segments, "/pages")
     response = requests.get(
         url,
-        auth=HTTPBasicAuth(XWIKI_USER, XWIKI_PASS),
+        auth=XWIKI_AUTH,
         headers={"Accept": "application/json"},
     )
     response.raise_for_status()

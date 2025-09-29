@@ -4,12 +4,14 @@
 # Importaciones necesarias para el funcionamiento del agente.
 import asyncio  # Para ejecutar codigo asincrono.
 import json  # Para manejar datos en formato JSON.
+import logging  # Para reportar avisos e información operativa.
 import os  # Para interactuar con el sistema operativo (variables de entorno, rutas).
 import sys  # Para informacion especifica del sistema, como la version de Python.
 import threading  # Para ejecutar tareas en hilos separados (usado para corutinas).
 import re  # Para usar expresiones regulares en la extraccion de texto.
 import time  # Para pausar la ejecucion (usado en reintentos).
 from datetime import datetime  # Para manejar fechas y horas (en logs).
+from pathlib import Path  # Para manejar rutas de archivos en disco.
 from typing import Any, Callable  # Para anotaciones de tipo estaticas.
 
 # Carga variables de entorno desde un archivo .env.
@@ -19,6 +21,10 @@ from dotenv import load_dotenv
 from google.adk.agents import Agent  # La clase base para crear un agente.
 from google.adk.runners import Runner  # Para ejecutar el agente.
 from google.adk.sessions import InMemorySessionService  # Un servicio de sesion simple en memoria.
+try:
+    from google.adk.sessions.sqlite import SqliteSessionService  # Servicio persistente basado en SQLite.
+except (ImportError, ModuleNotFoundError):
+    SqliteSessionService = None  # type: ignore[assignment]
 from google.genai import types  # Tipos de datos usados por la API de Gemini.
 
 # Importa las herramientas personalizadas del servidor. Maneja el caso de ejecucion local.
@@ -36,6 +42,14 @@ _TOOL_SUMMARY_CHARS_ENV = "TOOL_SUMMARY_MAX_CHARS"  # Maximo de caracteres para 
 _TOOL_SUMMARY_DEPTH_ENV = "TOOL_SUMMARY_MAX_DEPTH"  # Profundidad maxima en estructuras de datos para el resumen.
 _TOOL_LOG_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"  # Formato de fecha para los logs.
 
+# Variables para estimar el coste por token (USD por 1M tokens).
+_TOKEN_INPUT_COST_ENV = "GEMINI_INPUT_TOKEN_COST_USD"
+_TOKEN_OUTPUT_COST_ENV = "GEMINI_OUTPUT_TOKEN_COST_USD"
+_TOKEN_CACHE_COST_ENV = "GEMINI_CACHE_TOKEN_COST_USD"
+_DEFAULT_INPUT_COST_PER_MILLION = 0.35
+_DEFAULT_OUTPUT_COST_PER_MILLION = 1.05
+_DEFAULT_CACHE_COST_PER_MILLION = 0.08
+
 # Nombres de variables de entorno y valores para la logica de reintentos ante errores de cuota.
 _TOOL_MAX_RETRIES_ENV = "TOOL_API_MAX_RETRIES"  # Maximo numero de reintentos.
 _MIN_RETRY_WAIT_SECONDS = 1.0  # Tiempo minimo de espera entre reintentos.
@@ -49,6 +63,16 @@ def _default_tool_log_path() -> str:
     # El log se guarda en el mismo directorio que este script.
     base_dir = os.path.dirname(__file__)
     return os.path.join(base_dir, "tool_responses.log")
+
+
+def _read_float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -309,6 +333,124 @@ def run_coro_sync(coro_fn, *args, **kwargs):
     return result.get("value")
 
 
+# --- Servicio de sesiones persistentes --- #
+
+def _default_session_db(app_name: str) -> Path:
+    base_dir = os.environ.get("ADK_SESSION_STATE_DIR")
+    if base_dir:
+        candidate = Path(os.path.expanduser(base_dir))
+    else:
+        candidate = Path(__file__).resolve().parent / "state"
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate / f"{app_name}.sqlite3"
+
+
+def _build_session_service(app_name: str):
+    db_path_env = os.environ.get("ADK_SESSION_DB_PATH")
+    if SqliteSessionService:
+        if db_path_env:
+            db_path = Path(os.path.expanduser(db_path_env))
+        else:
+            db_path = _default_session_db(app_name)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        logging.info("Usando almacenamiento de sesiones persistente en %s", db_path)
+        return SqliteSessionService(db_path=str(db_path))
+    logging.warning(
+        "SqliteSessionService no está disponible; las sesiones se almacenarán solo en memoria."
+    )
+    return InMemorySessionService()
+
+
+# --- Contabilidad de tokens y costes --- #
+
+_INPUT_COST_PER_TOKEN = _read_float_env(_TOKEN_INPUT_COST_ENV, _DEFAULT_INPUT_COST_PER_MILLION) / 1_000_000
+_OUTPUT_COST_PER_TOKEN = _read_float_env(_TOKEN_OUTPUT_COST_ENV, _DEFAULT_OUTPUT_COST_PER_MILLION) / 1_000_000
+_CACHE_COST_PER_TOKEN = _read_float_env(_TOKEN_CACHE_COST_ENV, _DEFAULT_CACHE_COST_PER_MILLION) / 1_000_000
+
+
+def _safe_int(value) -> int:
+    try:
+        if value is None:
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _lookup(obj, name):
+    if obj is None:
+        return None
+    if hasattr(obj, name):
+        return getattr(obj, name)
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return None
+
+
+def _iterable_field(obj, name):
+    value = _lookup(obj, name)
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+class TokenTracker:
+    """Acumula tokens consumidos y estima el coste aproximado."""
+
+    def __init__(self) -> None:
+        self.prompt_tokens = 0
+        self.cached_tokens = 0
+        self.output_tokens = 0
+        self.thought_tokens = 0
+
+    def add_usage(self, usage) -> None:
+        prompt = _safe_int(_lookup(usage, "prompt_token_count"))
+        output = _safe_int(_lookup(usage, "candidates_token_count"))
+        thoughts = _safe_int(_lookup(usage, "thoughts_token_count")) or _safe_int(_lookup(usage, "thought_token_count"))
+        cached = 0
+        for detail in _iterable_field(usage, "cache_tokens_details"):
+            cached += _safe_int(_lookup(detail, "cached_content_token_count")) or _safe_int(_lookup(detail, "token_count"))
+        if prompt:
+            self.prompt_tokens += prompt
+        if output:
+            self.output_tokens += output
+        if cached:
+            self.cached_tokens += cached
+        if thoughts:
+            self.thought_tokens += thoughts
+
+    def record_event(self, event) -> None:
+        usage = getattr(event, "usage_metadata", None)
+        if usage:
+            self.add_usage(usage)
+
+    def totals(self) -> dict[str, float]:
+        prompt_paid = max(self.prompt_tokens - self.cached_tokens, 0)
+        cost = (
+            prompt_paid * _INPUT_COST_PER_TOKEN
+            + self.cached_tokens * _CACHE_COST_PER_TOKEN
+            + self.output_tokens * _OUTPUT_COST_PER_TOKEN
+        )
+        return {
+            "prompt": self.prompt_tokens,
+            "cached": self.cached_tokens,
+            "output": self.output_tokens,
+            "thoughts": self.thought_tokens,
+            "cost": cost,
+        }
+
+    def format_summary(self) -> str:
+        totals = self.totals()
+        return (
+            f"Tokens entrada: {totals['prompt']} (cache {totals['cached']}), "
+            f"salida: {totals['output']}, coste≈${totals['cost']:.4f}"
+        )
+
+
 # --- Fabrica del Agente --- #
 
 def build_agent() -> Agent:
@@ -354,9 +496,9 @@ def main():
     print(f"Python: {sys.version.split()[0]}")
     print("Entorno:", "Google Colab" if "google.colab" in sys.modules else "Local")
 
-    # Configura una sesion en memoria para mantener el contexto de la conversacion.
-    session_service = InMemorySessionService()
+    # Configura un servicio de sesiones persistente cuando está disponible.
     app_name = root_agent.name
+    session_service = _build_session_service(app_name)
     user_id = "user_1"
     session_id = "session_001"
 
@@ -375,6 +517,8 @@ def main():
         session_service=session_service,
         app_name=app_name,
     )
+
+    token_tracker = TokenTracker()
 
     print("\nHerramientas registradas:")
     for tool in root_agent.tools:
@@ -406,6 +550,8 @@ def main():
 
     # Itera sobre los eventos devueltos por el runner para mostrar el flujo de la conversacion.
     for event in events:
+        token_tracker.record_event(event)
+
         # Evento: El modelo decide llamar a una herramienta.
         if hasattr(event, "is_tool_call") and event.is_tool_call():
             tool_obj = getattr(event, "tool", None)
@@ -420,6 +566,7 @@ def main():
                 except TypeError:
                     preview = str(arguments)
                 preview = _truncate_text(preview, 200)
+            print(f"\nUso de tokens (acumulado): {token_tracker.format_summary()}")
             print(f"\nInvocando herramienta: {tool_name} con parametros {preview}")
             continue
 
@@ -427,13 +574,26 @@ def main():
         if hasattr(event, "is_tool_response") and event.is_tool_response():
             tool_obj = getattr(event, "tool", None)
             tool_name = getattr(tool_obj, "name", getattr(event, "tool_name", "desconocida"))
-            raw_output = _normalise_tool_output(getattr(event, "output", None))
+            output_payload = getattr(event, "output", None)
+            raw_output = _normalise_tool_output(output_payload)
             log_path = _log_tool_output(tool_name, raw_output) if raw_output else None
             summary, truncated = _summarise_tool_output(raw_output)
             print(f"Resultado de {tool_name}:")
             print(summary)
             if truncated and log_path:
                 print(f"(Resultado completo guardado en {log_path})")
+
+            if (
+                tool_name == "search_pages"
+                and isinstance(output_payload, dict)
+                and output_payload.get("suggest_describe_space_tree")
+            ):
+                filtered = output_payload.get("filtered_space")
+                hint = (
+                    "Considera invocar describe_space_tree para explorar la jerarquía"
+                    + (f" bajo '{filtered}'" if filtered else "")
+                )
+                print(f"Sugerencia: {hint}.")
             continue
 
         # Evento: El modelo da su respuesta final al usuario.
@@ -441,6 +601,7 @@ def main():
             parts = getattr(event.content, "parts", [])
             text = parts[0].text if parts else ""
             print(f"\nAgent Response: {text}")
+            print(f"\nResumen de coste: {token_tracker.format_summary()}")
 
 # Este bloque asegura que la funcion main() solo se ejecute cuando el script es invocado directamente.
 if __name__ == "__main__":

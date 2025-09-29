@@ -1,0 +1,22 @@
+[Unit]
+Description=XWiki MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace with the user/group that should run the service
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/adk-mcp
+EnvironmentFile=/opt/adk-mcp/.env
+ExecStart=/usr/bin/python3 -m xwiki_agent.server
+Restart=on-failure
+RestartSec=5
+# Persist sessions and logs next to the repo
+Environment=ADK_SESSION_DB_PATH=/opt/adk-mcp/state/sessions.sqlite3
+StandardOutput=append:/opt/adk-mcp/logs/systemd-out.log
+StandardError=append:/opt/adk-mcp/logs/systemd-err.log
+
+[Install]
+WantedBy=multi-user.target

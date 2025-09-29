@@ -18,6 +18,9 @@ import subprocess
 from pathlib import Path
 import importlib.util
 
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+
 # --- Funciones de Utilidad para la Interfaz ---
 
 def print_header(title: str):
@@ -186,57 +189,36 @@ def check_api_keys():
         return False
 
 def check_xwiki_config():
-    """Verifica que las credenciales de XWiki estén configuradas en 'server.py'."""
+    """Verifica que existan URL y credenciales válidas para XWiki."""
     print_header("VERIFICACIÓN DE CONFIGURACIÓN DE XWIKI")
-    
-    server_path = Path(__file__).parent / "server.py"
-    
-    if not server_path.exists():
-        print_status("Configuración de XWiki", False, "El archivo 'server.py' no fue encontrado.")
-        return False
-    
+
     try:
-        with open(server_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Credenciales a buscar dentro del archivo.
-        configs_to_check = {
-            'XWIKI_URL': 'URL del servidor XWiki',
-            'XWIKI_USER': 'Usuario para la API de XWiki',
-            'XWIKI_PASS': 'Contraseña para la API de XWiki',
-        }
-        
-        all_configs_ok = True
-        
-        for config_name, description in configs_to_check.items():
-            # Busca la línea donde se define la variable.
-            if config_name in content:
-                lines = content.split('\n')
-                found_line = False
-                for line in lines:
-                    if line.strip().startswith(f'{config_name} ='):
-                        found_line = True
-                        # Extrae el valor de la variable.
-                        value = line.split('=', 1)[1].strip().strip('"\'')
-                        # Comprueba si el valor es un placeholder o está vacío.
-                        if value and 'your_' not in value.lower() and 'change_me' not in value.lower() and value != "":
-                            print_status(f"Variable '{config_name}'", True, f"{description} parece estar configurada.")
-                        else:
-                            print_status(f"Variable '{config_name}'", False, f"{description} parece ser un placeholder o está vacía. Debes cambiarla en 'server.py'.")
-                            all_configs_ok = False
-                        break
-                if not found_line:
-                    print_status(f"Variable '{config_name}'", False, f"La definición de '{description}' no se encontró en el formato esperado.")
-                    all_configs_ok = False
-            else:
-                print_status(f"Variable '{config_name}'", False, f"La definición de '{description}' no existe en 'server.py'.")
-                all_configs_ok = False
-        
-        return all_configs_ok
-        
-    except Exception as e:
-        print_status("Análisis de configuración de XWiki", False, f"Ocurrió un error inesperado: {e}")
-        return False
+        from secret_manager import load_xwiki_credentials, SecretRetrievalError, get_masked_username  # type: ignore
+    except ImportError:
+        from .secret_manager import load_xwiki_credentials, SecretRetrievalError, get_masked_username  # type: ignore
+
+    url = os.getenv("XWIKI_URL")
+    url_ok = bool(url)
+    if url_ok:
+        print_status("Variable 'XWIKI_URL'", True, f"Detectada: {url}")
+    else:
+        print_status("Variable 'XWIKI_URL'", False, "Define XWIKI_URL en tu entorno o archivo .env.")
+
+    try:
+        creds = load_xwiki_credentials()
+        masked_user = get_masked_username() or creds.username
+        print_status(
+            "Credenciales de XWiki",
+            True,
+            f"Fuente: {creds.source} | Usuario: {masked_user}"
+        )
+        creds_ok = True
+    except SecretRetrievalError as exc:
+        print_status("Credenciales de XWiki", False, str(exc))
+        creds_ok = False
+
+    return url_ok and creds_ok
+
 
 # --- Reporte y Ejecución Principal ---
 
@@ -265,7 +247,7 @@ def generate_report(results: dict):
         if not results.get('api_keys', True):
             print("  3. Configura tu clave de API de Google en un archivo .env.")
         if not results.get('xwiki_config', True):
-            print("  4. Revisa y corrige las credenciales de XWiki en el archivo 'server.py'.")
+            print("  4. Configura XWIKI_URL y registra las credenciales en el almacén seguro (secret_manager).")
         if not results.get('server_syntax', True):
             print("  5. Corrige los errores de sintaxis o las definiciones faltantes en 'server.py'.")
 
